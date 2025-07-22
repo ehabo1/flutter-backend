@@ -1,33 +1,27 @@
 const express = require('express');
 const cors = require('cors');
-const sqlite3 = require('sqlite3').verbose();
+const Database = require('better-sqlite3');
 const bodyParser = require('body-parser');
 const bcrypt = require('bcrypt');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// middleware
 app.use(cors());
 app.use(bodyParser.json());
 
-// قاعدة بيانات SQLite داخل ملف (وليس في الذاكرة)
-const db = new sqlite3.Database('./db.sqlite', (err) => {
-  if (err) return console.error('❌ فشل فتح قاعدة البيانات:', err.message);
-  console.log('📦 قاعدة البيانات جاهزة');
-});
+// قاعدة بيانات SQLite دائمة في ملف
+const db = new Database('./db.sqlite');
 
-// إنشاء جدول المستخدمين إذا غير موجود
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      phone TEXT NOT NULL UNIQUE,
-      password TEXT NOT NULL
-    )
-  `);
-});
+// إنشاء جدول المستخدمين (مرة واحدة فقط)
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    phone TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL
+  )
+`).run();
 
 // ✅ تسجيل مستخدم جديد
 app.post('/register', async (req, res) => {
@@ -39,66 +33,58 @@ app.post('/register', async (req, res) => {
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
+    const stmt = db.prepare("INSERT INTO users (name, phone, password) VALUES (?, ?, ?)");
+    const result = stmt.run(name, phone, hashedPassword);
 
-    db.run(
-      'INSERT INTO users (name, phone, password) VALUES (?, ?, ?)',
-      [name, phone, hashedPassword],
-      function (err) {
-        if (err) {
-          return res.status(500).json({ message: 'الرقم مستخدم مسبقاً' });
-        }
-
-        res.status(201).json({
-          message: 'تم التسجيل بنجاح',
-          userId: this.lastID,
-        });
-      }
-    );
-  } catch (error) {
-    res.status(500).json({ message: 'خطأ أثناء التسجيل' });
+    res.status(201).json({ message: 'تم التسجيل بنجاح', userId: result.lastInsertRowid });
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(400).json({ message: 'رقم الهاتف مستخدم مسبقاً' });
+    }
+    res.status(500).json({ message: 'حدث خطأ أثناء التسجيل' });
   }
 });
 
-// ✅ تسجيل الدخول
-app.post('/login', (req, res) => {
+// ✅ تسجيل دخول
+app.post('/login', async (req, res) => {
   const { phone, password } = req.body;
 
-  db.get(
-    'SELECT * FROM users WHERE phone = ?',
-    [phone],
-    async (err, user) => {
-      if (err || !user) {
-        return res.status(400).json({ message: 'رقم الهاتف غير صحيح' });
-      }
+  try {
+    const user = db.prepare("SELECT * FROM users WHERE phone = ?").get(phone);
 
-      const match = await bcrypt.compare(password, user.password);
-      if (!match) {
-        return res.status(401).json({ message: 'كلمة المرور غير صحيحة' });
-      }
-
-      res.json({ message: 'تم تسجيل الدخول بنجاح', user });
+    if (!user) {
+      return res.status(400).json({ message: 'رقم الهاتف غير صحيح' });
     }
-  );
+
+    const match = await bcrypt.compare(password, user.password);
+
+    if (!match) {
+      return res.status(401).json({ message: 'كلمة المرور غير صحيحة' });
+    }
+
+    res.json({ message: 'تم تسجيل الدخول بنجاح', user: { id: user.id, name: user.name, phone: user.phone } });
+  } catch (err) {
+    res.status(500).json({ message: 'حدث خطأ أثناء تسجيل الدخول' });
+  }
 });
 
-// ✅ جلب معلومات مستخدم
+// ✅ جلب بيانات مستخدم
 app.get('/user/:id', (req, res) => {
   const { id } = req.params;
 
-  db.get(
-    'SELECT id, name, phone FROM users WHERE id = ?',
-    [id],
-    (err, user) => {
-      if (err || !user) {
-        return res.status(404).json({ message: 'المستخدم غير موجود' });
-      }
+  try {
+    const user = db.prepare("SELECT id, name, phone FROM users WHERE id = ?").get(id);
 
-      res.json(user);
+    if (!user) {
+      return res.status(404).json({ message: 'المستخدم غير موجود' });
     }
-  );
+
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: 'حدث خطأ أثناء جلب البيانات' });
+  }
 });
 
-// ✅ بدء تشغيل السيرفر
 app.listen(port, () => {
   console.log(`✅ السيرفر يعمل على http://localhost:${port}`);
 });
